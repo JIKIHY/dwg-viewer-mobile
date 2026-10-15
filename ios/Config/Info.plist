@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key><string>ko</string>
+	<key>CFBundleDisplayName</key><string>DWG 뷰어</string>
+	<key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key><true/>
+	<key>ITSAppUsesNonExemptEncryption</key><false/>
+	<key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+	<key>UILaunchScreen</key><dict><key>UIColorName</key><string>LaunchBG</string></dict>
+	<key>UIStatusBarStyle</key><string>UIStatusBarStyleLightContent</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+	<!-- 카카오톡·메일·파일 앱에서 "다른 앱으로 열기" → DWG 뷰어 -->
+	<key>LSSupportsOpeningDocumentsInPlace</key><false/>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key><string>AutoCAD 도면</string>
+			<key>CFBundleTypeRole</key><string>Viewer</string>
+			<key>LSHandlerRank</key><string>Alternate</string>
+			<key>LSItemContentTypes</key><array><string>com.autodesk.dwg</string><string>com.autodesk.dxf</string></array>
+		</dict>
+	</array>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key><string>com.autodesk.dwg</string>
+			<key>UTTypeDescription</key><string>AutoCAD 도면 (DWG)</string>
+			<key>UTTypeConformsTo</key><array><string>public.data</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key><array><string>dwg</string><string>DWG</string></array>
+				<key>public.mime-type</key><array><string>image/vnd.dwg</string><string>application/acad</string><string>application/x-dwg</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key><string>com.autodesk.dxf</string>
+			<key>UTTypeDescription</key><string>AutoCAD 교환 도면 (DXF)</string>
+			<key>UTTypeConformsTo</key><array><string>public.data</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key><array><string>dxf</string><string>DXF</string></array>
+				<key>public.mime-type</key><array><string>image/vnd.dxf</string><string>application/dxf</string></array>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>

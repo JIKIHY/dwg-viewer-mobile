@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="DWG 뷰어" />
+  <meta name="theme-color" content="#1b1d21" />
+  <meta name="format-detection" content="telephone=no" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icon-180.png" />
+  <title>DWG 뷰어</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <button id="btn-home" class="ic" aria-label="처음 화면">‹</button>
+    <div id="docname">DWG 뷰어</div>
+    <button id="btn-open" class="ic" aria-label="도면 열기">📂</button>
+  </header>
+
+  <div id="stage">
+    <canvas id="gl"></canvas>
+    <canvas id="text"></canvas>
+    <canvas id="ui"></canvas>
+    <div id="cross" hidden></div>
+    <div id="hint" hidden></div>
+    <div id="mbar" hidden>
+      <button id="m-cancel">취소</button>
+      <button id="m-undo">되돌리기</button>
+      <button id="m-add" class="primary">＋ 점 찍기</button>
+      <button id="m-done" hidden>완료</button>
+    </div>
+  </div>
+
+  <nav id="toolbar">
+    <button id="t-extents"><span>⤢</span>전체</button>
+    <button id="t-dist" data-tool="dist"><span>📏</span>거리</button>
+    <button id="t-area" data-tool="area"><span>⬠</span>면적</button>
+    <button id="t-layers" data-sheet="layers"><span>▤</span>레이어</button>
+    <button id="t-search" data-sheet="search"><span>🔍</span>검색</button>
+    <button id="t-more" data-sheet="more"><span>⋯</span>더보기</button>
+  </nav>
+
+  <!-- 처음 화면 -->
+  <section id="home">
+    <div class="hero">
+      <div class="logo">📐</div>
+      <h1>DWG 뷰어</h1>
+      <p>휴대폰 안에서 바로 변환합니다 · 인터넷 연결 불필요</p>
+      <button id="h-open" class="big primary">도면 열기</button>
+      <p class="note">XREF는 <b>도면 폴더를 연결</b>해 두거나, 본 도면과 XREF 파일을 <b>함께 선택</b>하면 자동으로 붙습니다.</p>
+    </div>
+    <h2>최근 도면</h2>
+    <ul id="recent" class="list"></ul>
+    <div id="folders" hidden>
+      <h2>도면 폴더</h2>
+      <p id="folder-note" class="note">도면이 들어 있는 <b>상위 폴더</b>(예: 프로젝트 CAD 폴더)를 한 번 연결해 두면, 데스크톱처럼 XREF를 그 안에서 자동으로 찾아 붙이고 여기서 바로 열 수 있습니다.</p>
+      <ul id="folder-list" class="list"></ul>
+      <button id="btn-link" class="wide">＋ 도면 폴더 연결</button>
+      <div id="lib-box" hidden>
+        <input id="lib-filter" type="search" placeholder="파일 이름·폴더 검색" />
+        <ul id="lib-list" class="list"></ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 아래에서 올라오는 패널 -->
+  <div id="sheet-bg" hidden></div>
+  <section id="sheet" hidden>
+    <div class="grab"></div>
+    <header><h3 id="sheet-title"></h3><button id="sheet-close" class="ic">✕</button></header>
+
+    <div class="pane" data-pane="layers">
+      <div class="row"><input id="layer-filter" type="search" placeholder="레이어 이름 검색" /></div>
+      <div class="row">
+        <button id="layers-all-on">모두 켜기</button>
+        <button id="layers-all-off">모두 끄기</button>
+        <button id="layers-invert">반전</button>
+      </div>
+      <ul id="layer-list" class="list"></ul>
+    </div>
+
+    <div class="pane" data-pane="search">
+      <div class="row"><input id="search-input" type="search" placeholder="도면 안의 문자 (예: 기둥, C1, 2400)" enterkeyhint="search" /></div>
+      <ul id="search-list" class="list"></ul>
+    </div>
+
+    <div class="pane" data-pane="measure">
+      <ul id="measure-list" class="list"></ul>
+      <div class="row"><button id="btn-clear">측정 모두 지우기</button></div>
+    </div>
+
+    <div class="pane" data-pane="xrefs">
+      <p class="note">도면과 함께 고른 파일·최근 도면에서 이름이 같은 파일을 찾아 붙입니다. 못 찾은 XREF는 <b>파일 지정</b>으로 연결하세요.</p>
+      <ul id="xref-list" class="list"></ul>
+    </div>
+
+    <div class="pane" data-pane="pick">
+      <p class="note">나머지 파일은 XREF 후보로 보관됩니다.</p>
+      <ul id="pick-list" class="list"></ul>
+    </div>
+
+    <div class="pane" data-pane="more">
+      <ul class="list menu">
+        <li id="mn-measure">📐 측정 목록</li>
+        <li id="mn-xrefs">📎 XREF</li>
+        <li id="mn-bg">◐ 배경 검정/흰색</li>
+        <li id="mn-png">📷 현재 화면 이미지로 저장·공유</li>
+        <li id="mn-snap">🧲 스냅 설정</li>
+        <li id="mn-about">ⓘ 정보 · 오픈소스 라이선스</li>
+      </ul>
+      <div id="snap-opts" class="snapbox" hidden>
+        <label><input type="checkbox" id="snap-end" checked /> 끝점</label>
+        <label><input type="checkbox" id="snap-mid" checked /> 중간점</label>
+        <label><input type="checkbox" id="snap-cen" checked /> 중심</label>
+        <label><input type="checkbox" id="snap-near" checked /> 선 위</label>
+      </div>
+      <p id="doc-info" class="note"></p>
+    </div>
+  </section>
+
+  <div id="loading" hidden><div class="spinner"></div><div id="loading-msg">불러오는 중…</div></div>
+  <input id="file" type="file" accept=".dwg,.dxf,application/acad,image/vnd.dwg,image/vnd.dxf,application/dxf" multiple hidden />
+  <input id="file-xref" type="file" accept=".dwg,.dxf,application/acad,image/vnd.dwg,image/vnd.dxf,application/dxf" multiple hidden />
+
+  <script src="vendor/earcut.min.js"></script>
+  <script src="core/dxf.js"></script>
+  <script src="core/scene.js"></script>
+  <script src="core/view.js"></script>
+  <script src="store.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+ios/build/
+ios/DWGViewer.xcodeproj/
+.DS_Store
+node_modules/
