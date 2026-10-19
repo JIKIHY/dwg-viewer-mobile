@@ -24,14 +24,19 @@ struct WebContainer: UIViewRepresentable {
         if #available(iOS 16.4, *) { wv.isInspectable = true } // Mac 사파리 → 개발자용 메뉴에서 확인
         #endif
         bridge.webView = wv
-        wv.load(URLRequest(url: URL(string: "\(WebBridge.scheme)://local/index.html")!))
+        wv.navigationDelegate = bridge
+        var q = ""
+        #if DEBUG
+        q = ProcessInfo.processInfo.environment["DWGV_TEST_QUERY"].map { "?" + $0 } ?? "" // 예: bench
+        #endif
+        wv.load(URLRequest(url: URL(string: "\(WebBridge.scheme)://local/index.html\(q)")!))
         return wv
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
 
-final class WebBridge: NSObject, ObservableObject, WKURLSchemeHandler, WKScriptMessageHandler, WKScriptMessageHandlerWithReply, UIDocumentPickerDelegate {
+final class WebBridge: NSObject, ObservableObject, WKURLSchemeHandler, WKScriptMessageHandler, WKScriptMessageHandlerWithReply, UIDocumentPickerDelegate, WKNavigationDelegate {
     static let scheme = "app"
     weak var webView: WKWebView?
     private var ready = false
@@ -61,7 +66,11 @@ final class WebBridge: NSObject, ObservableObject, WKURLSchemeHandler, WKScriptM
     }
 
     #if DEBUG
-    func debugLink(_ path: String) { lib.queue.sync { lib.link(URL(fileURLWithPath: path)) } }
+    func debugLink(_ path: String) {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : docs.appendingPathComponent(path)
+        lib.queue.sync { lib.link(url) }
+    }
     #endif
 
     private func stash(_ data: Data) -> String {
@@ -187,6 +196,13 @@ final class WebBridge: NSObject, ObservableObject, WKURLSchemeHandler, WKScriptM
             pop.sourceRect = CGRect(x: wv.bounds.midX, y: wv.bounds.maxY - 80, width: 1, height: 1)
         }
         top.present(vc, animated: true)
+    }
+
+    // 웹 화면 프로세스가 iOS에 의해 꺼지면(메모리 초과 등) 기록하고 처음 화면으로 다시 띄운다
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        NSLog("[DWG] %@", "웹 화면 프로세스 종료됨 (메모리 초과 가능성) — 다시 불러옴")
+        ready = false
+        webView.reload()
     }
 
     // MARK: app://local/… 내려주기

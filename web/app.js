@@ -7,7 +7,7 @@
 
   const MAX_DPR = 2; // 휴대폰 3배 화면은 2배로 그려도 충분하고 훨씬 가볍다
   const dprOf = () => Math.min(MAX_DPR, window.devicePixelRatio || 1);
-  const view = new View($('#gl'), $('#text'));
+  const view = new TileView($('#gl'), $('#text'));
   const ui = $('#ui');
   const uctx = ui.getContext('2d');
 
@@ -27,6 +27,7 @@
   const baseName = (p) => String(p).split(/[\\/]/).pop();
   const tick = () => new Promise((r) => setTimeout(r, 30));
   const isDrawing = (n) => /\.(dwg|dxf)$/i.test(n);
+  const BENCH = /bench/.test(location.search);
   const native = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.native;
   const nativeR = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nativeReply;
   const ask = (msg) => (nativeR ? nativeR.postMessage(msg) : Promise.resolve(null)); // 앱에 묻고 답 받기
@@ -57,32 +58,56 @@
   }
 
   // ───────────────────────── DWG → DXF 변환 (워커) ─────────────────────────
-  // 변환기(WASM)는 큰 도면에서 메모리를 수백 MB~GB까지 늘리고 줄이지 않는다.
-  // 휴대폰에서 앱이 강제 종료되지 않도록 변환이 끝나 잠시 쉬면 워커를 통째로 내려 메모리를 돌려준다
-  let worker = null, jobId = 0, idleTimer = null;
+  // 변환기(WASM)는 큰 도면에서 메모리를 수백 MB~GB까지 늘리고 줄이지 않으므로 다 쓴 워커는 통째로 내린다.
+  // 큰 DWG는 변환(WASM, 18MB 도면에 ~1.9GB)과 해석(임시 ~1GB)을 한 워커에서 이어 하면 두 메모리가 겹쳐
+  // iOS가 화면 프로세스를 강제 종료한다(실기기 확인). 그래서 변환 워커를 끝나자마자 내려 메모리를 돌려받은 뒤
+  // 새 워커에서 해석한다. 작은 파일은 한 워커에서 둘 다 하고, 잠시 쉬면 내린다
+  let worker = null, jobId = 0, idleTimer = null; // worker: 작은 파일용으로 잠시 살려 두는 공용 워커
   const jobs = new Map();
-  function convertDwg(bytes) {
-    clearTimeout(idleTimer);
-    if (!worker) {
-      worker = new Worker('convert-worker.js', { type: 'module' });
-      worker.onmessage = (ev) => {
-        const j = jobs.get(ev.data.id);
-        jobs.delete(ev.data.id);
-        if (j) ev.data.ok ? j.res(new Uint8Array(ev.data.dxf)) : j.rej(new Error(ev.data.error));
-        if (!jobs.size) idleTimer = setTimeout(() => { if (!jobs.size && worker) { worker.terminate(); worker = null; } }, 1500);
-      };
-      worker.onerror = (ev) => {
-        for (const j of jobs.values()) j.rej(new Error('변환기 오류: ' + (ev.message || '알 수 없음')));
-        jobs.clear();
-        worker = null;
-      };
-    }
+  const BIG = 1048576; // 이보다 큰 DWG·(8배) DXF는 단계마다 전용 워커를 새로 띄운다
+  function killWorker() { clearTimeout(idleTimer); if (worker) { worker.terminate(); worker = null; } }
+  function makeWorker() {
+    const w = new Worker('convert-worker.js', { type: 'module' });
+    w.onmessage = (ev) => {
+      const j = jobs.get(ev.data.id);
+      jobs.delete(ev.data.id);
+      if (!j) return;
+      // 결과를 넘기기 전에 전용 워커부터 내린다 → 다음 단계가 시작될 때 이 워커의 메모리는 이미 놓여 있다
+      if (j.oneShot) w.terminate();
+      else if (![...jobs.values()].some((x) => x.w === w)) idleTimer = setTimeout(() => { if (worker === w && ![...jobs.values()].some((x) => x.w === w)) killWorker(); }, 1500);
+      ev.data.ok ? j.res(ev.data) : j.rej(new Error(ev.data.error));
+    };
+    w.onerror = (ev) => {
+      for (const [id, j] of jobs) if (j.w === w) { jobs.delete(id); j.rej(new Error('변환기 오류: ' + (ev.message || '알 수 없음'))); }
+      w.terminate();
+      if (worker === w) worker = null;
+    };
+    return w;
+  }
+  function runWorker(msg, transfer, oneShot) {
+    let w;
+    if (oneShot) w = makeWorker();
+    else { clearTimeout(idleTimer); w = worker || (worker = makeWorker()); }
     const id = ++jobId;
     return new Promise((res, rej) => {
-      jobs.set(id, { res, rej });
-      const copy = bytes.slice(0); // 원본은 보관함·재변환용으로 남긴다
-      worker.postMessage({ id, bytes: copy }, [copy]);
+      jobs.set(id, { res, rej, oneShot, w });
+      w.postMessage({ id, ...msg }, transfer);
     });
+  }
+  const rest = () => new Promise((r) => setTimeout(r, 300)); // 내린 워커의 메모리가 실제로 풀릴 틈
+  async function parseInWorker(bytes, dwg) {
+    const copy = bytes.slice(0); // 원본은 보관함·재변환용으로 남긴다
+    if (dwg && bytes.byteLength > BIG) {
+      const { dxf } = await runWorker({ op: 'dxf', bytes: copy }, [copy], true);
+      await rest();
+      const r = await runWorker({ op: 'parse', bytes: dxf }, [dxf], true);
+      await rest();
+      return r.doc;
+    }
+    const big = bytes.byteLength > 8 * BIG;
+    const r = await runWorker({ op: dwg ? 'both' : 'parse', bytes: copy }, [copy], big);
+    if (big) await rest();
+    return r.doc;
   }
 
   // ───────────────────────── 파일 보관 / 찾기 ─────────────────────────
@@ -130,8 +155,7 @@
       S.docLoads.set(key, (async () => {
         const f = await bytesOf(key);
         if (!f) throw new Error('파일 없음');
-        const u8 = /\.dwg$/i.test(f.name) ? await convertDwg(f.bytes) : new Uint8Array(f.bytes);
-        const d = DXF.parse(u8);
+        const d = await parseInWorker(f.bytes, /\.dwg$/i.test(f.name)); // 변환·해석 모두 워커에서
         S.docs.set(key, d);
         return d;
       })());
@@ -140,10 +164,11 @@
     return S.docLoads.get(key);
   }
 
-  async function loadXrefs(doc, hostKey, depth, chain, visited) {
+  async function loadXrefs(doc, hostKey, depth, chain, visited, tok) {
     doc.xrefPaths = {};
     const blks = Object.values(doc.blocks).filter((b) => b.flags & 4);
     for (const b of blks) { // 휴대폰 메모리를 생각해 하나씩 변환
+      if (S.xrefStop || tok !== openToken) return;
       const key = b.name.toUpperCase();
       const overlay = (b.flags & 8) !== 0;
       if (depth > 0 && overlay) continue;
@@ -153,15 +178,20 @@
       if (!res) continue;
       if (chain.includes(res)) { entry.status = 'cycle'; continue; }
       try {
-        $('#loading-msg').textContent = `XREF 불러오는 중: ${b.name}`;
+        S.xrefDone = (S.xrefDone || 0) + 1;
+        $('#loading-msg').textContent = `XREF 불러오는 중 (${S.xrefDone}) ${b.name}`;
+        $('#xbar-msg').textContent = `XREF 불러오는 중 · ${S.xrefDone}개째 · ${b.name}`;
+        const tx = performance.now();
         const xd = await loadDoc(res);
+        if (tok !== openToken) return;
+        log(`XREF ${S.xrefDone} ${b.name} ${Math.round(performance.now() - tx)}ms`);
         doc.xrefPaths[key] = res;
         const pf = pool.get(res) || {};
         entry.resolved = pf.path || pf.name || res;
         entry.status = 'ok';
         if (!visited.has(res)) {
           visited.add(res);
-          await loadXrefs(xd, res, depth + 1, chain.concat(res), visited);
+          await loadXrefs(xd, res, depth + 1, chain.concat(res), visited, tok);
         }
       } catch (err) {
         entry.status = 'error';
@@ -171,7 +201,9 @@
   }
   async function reloadXrefs() {
     S.xrefs = [];
-    await loadXrefs(S.mainDoc, S.mainKey, 0, [S.mainKey], new Set());
+    S.xrefDone = 0;
+    S.xrefStop = false;
+    await loadXrefs(S.mainDoc, S.mainKey, 0, [S.mainKey], new Set(), openToken);
   }
 
   // 파일 선택 결과 처리. 여러 개면 어느 것을 열지 묻고 나머지는 XREF 후보로 둔다
@@ -179,7 +211,9 @@
     const list = [];
     for (const f of files) {
       if (!isDrawing(f.name)) continue;
-      const bytes = f.bytes || (await f.arrayBuffer());
+      // 앱에서 넘긴 항목은 bytes(ArrayBuffer)가 있고, 브라우저 File은 arrayBuffer()로 읽는다
+      // (최신 브라우저의 File에는 bytes() 메서드가 있어 f.bytes만 보면 함수가 잡힌다)
+      const bytes = f.bytes instanceof ArrayBuffer ? f.bytes : await f.arrayBuffer();
       const key = Store.keyOf(f.name);
       pool.set(key, { name: f.name, bytes, path: f.path, picked: true });
       list.push({ key, name: f.name, bytes, path: f.path });
@@ -214,7 +248,9 @@
   }
   const mb = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
 
+  let openToken = 0;
   async function openMain(key) {
+    S.xrefStop = true; // 앞 도면의 XREF 불러오기가 진행 중이면 멈춘다
     setLoading(true, '도면 변환 중…');
     await tick();
     try {
@@ -231,13 +267,39 @@
       S.mainDoc = doc;
       S.loadSec = (performance.now() - t0) / 1000;
       Store.put(f.name, f.bytes, true, f.path);
-      await reloadXrefs();
+      const token = ++openToken;
+      const hasXref = Object.values(doc.blocks).some((b) => b.flags & 4);
+      // 본 도면부터 바로 보여 준다 (XREF가 수십 개면 다 붙이는 데 오래 걸려 '먹통'처럼 보이므로)
+      doc.xrefPaths = {};
       await rebuild(false);
       $('#docname').textContent = f.name;
       document.title = f.name;
       showHome(false);
       setTool('pan');
+      setLoading(false);
+      if (hasXref) {
+        $('#xbar-msg').textContent = 'XREF 찾는 중…';
+        $('#xbar').hidden = false;
+        document.body.classList.add('xloading');
+        try { await reloadXrefs(); } finally {
+          if (token === openToken) { $('#xbar').hidden = true; document.body.classList.remove('xloading'); }
+        }
+        if (token !== openToken) return; // 그사이 다른 도면을 열었음
+        const stopped = S.xrefStop;
+        const okN = S.xrefs.filter((x) => x.status === 'ok').length;
+        if (okN) await rebuild(true);
+        S.docs = new Map([[S.mainKey, S.mainDoc]]); // 화면에 다 옮겼으니 XREF 해석본은 놓는다 (~수백 MB)
+        S.docLoads = new Map();
+        if (stopped) { hint(`XREF 불러오기를 멈췄습니다 (${okN}개만 표시)`, 4000); log('XREF 중단'); return; }
+      }
       const miss = S.xrefs.filter((x) => x.status !== 'ok').length;
+      if (BENCH) setTimeout(async () => {
+        for (const z of [1, 4, 16, 64]) {
+          view.zoomExtents(); view.zoomAt(view.w / 2, view.h / 2, z);
+          log(`벤치 확대 ${z}배`); view.render(); view.render();
+          await tick();
+        }
+      }, 1500);
       log(`열기 성공: ${f.name} 변환 ${S.loadSec.toFixed(2)}초, 구성 ${S.buildSec.toFixed(2)}초, 선 ${S.scene.stats.segments}, XREF ${S.xrefs.length}(못 찾음 ${miss})`);
       if (miss) hint(`XREF ${miss}개를 찾지 못했습니다. ${nativeR ? '도면이 든 상위 폴더를 처음 화면에서 연결하면 자동으로 찾습니다.' : '더보기 → XREF에서 파일을 지정하세요.'}`, 7000);
     } catch (err) {
@@ -253,13 +315,21 @@
     setLoading(true, '화면 구성 중…');
     await tick();
     const t0 = performance.now();
-    const scene = Scene.build({ mainDoc: S.mainDoc, docs: S.docs, attached: S.attached });
+    // 변환기(WASM)가 남아 있으면 화면 구성 전에 내려 메모리를 비운다
+    if (worker && !jobs.size) killWorker();
+    log('화면 구성 시작');
+    view.startTiles();
+    const scene = Scene.build({ mainDoc: S.mainDoc, docs: S.docs, attached: S.attached, lite: true, freeDocs: true, onTile: (t, col) => view.addTile(t, col) });
+    log(`화면 구성 끝 ${((performance.now() - t0) / 1000).toFixed(1)}초, 선 ${scene.stats.segments}`);
     S.scene = scene;
     S.index = null;
     S.buildSec = (performance.now() - t0) / 1000;
+    S.docs = new Map([[S.mainKey, S.mainDoc]]); S.docLoads = new Map(); // 코어가 전개 뒤 XREF 해석본을 비웠다(freeDocs)
     view.layerVis = scene.layers.map((l) => (S.layerVis.has(l.key) ? S.layerVis.get(l.key) : l.visible));
     view.groupVis = scene.groups.map((g) => S.groupVis.get(g.key) !== false);
     view.setScene(scene, keepView);
+    log(`GPU로 올림 ${((performance.now() - t0) / 1000).toFixed(1)}초`);
+    if (measuring()) ensureIndex().then(() => { updateCenter(); drawUI(); });
     $$('#toolbar button').forEach((b) => (b.disabled = false));
     setLoading(false);
   }
@@ -620,74 +690,122 @@
   }
 
   // ───────────────────────── 스냅 ─────────────────────────
+  // 스냅 색인: 격자 칸별 목록을 Int32Array 두 개(시작 위치·번호)로 만든다 (수백만 개여도 메모리가 작다).
+  // 화면 구성 직후가 아니라 측정을 처음 켤 때 만든다
+  const G = 512, NC = (G + 1) * (G + 1);
+  // 스냅용 선분 목록: get(i, o) 가 o에 [x1,y1,x2,y2](월드 좌표)를 채운다
+  function segSource() {
+    const s = S.scene;
+    if (s.segs) {
+      const A = s.segs.a;
+      return { n: A.length / 4, get: (i, o) => { o[0] = A[i * 4]; o[1] = A[i * 4 + 1]; o[2] = A[i * 4 + 2]; o[3] = A[i * 4 + 3]; }, layerOf: (i) => [s.segs.layer[i], 0] };
+    }
+    const ox = s.origin[0], oy = s.origin[1];
+    // lite: 코어가 구역별로 남긴 좌표(tiles[].pos, 원점 기준 Float32)를 그대로 쓴다
+    const T = s.tiles || [];
+    const off = [0];
+    for (const t of T) off.push(off[off.length - 1] + t.n);
+    const tileOf = (i) => { let lo = 0, hi = T.length - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (off[m] <= i) lo = m; else hi = m - 1; } return lo; };
+    return {
+      n: off[off.length - 1],
+      get: (i, o) => {
+        const t = tileOf(i), P = T[t].pos, k = (i - off[t]) * 4;
+        o[0] = P[k] + ox; o[1] = P[k + 1] + oy; o[2] = P[k + 2] + ox; o[3] = P[k + 3] + oy;
+      },
+      layerOf: (i) => {
+        const t = tileOf(i), v = (i - off[t]) * 2, ps = T[t].pieces;
+        let lo = 0, hi = ps.length - 1;
+        while (lo < hi) { const m = (lo + hi + 1) >> 1; if (ps[m].s <= v) lo = m; else hi = m - 1; }
+        return [ps[lo].layer, ps[lo].group];
+      },
+    };
+  }
   function buildIndex() {
     const s = S.scene;
     const e = s.fullExtents;
-    const G = 512;
     const cs = Math.max(e[2] - e[0], e[3] - e[1]) / G || 1;
-    const cell = (x, y) => [Math.min(G, Math.max(0, Math.floor((x - e[0]) / cs))), Math.min(G, Math.max(0, Math.floor((y - e[1]) / cs)))];
-    const key = (ix, iy) => ix * 1024 + iy;
-    const pts = new Map(), segs = new Map();
-    const add = (map, k, i) => { let a = map.get(k); if (!a) map.set(k, (a = [])); a.push(i); };
-    const P = s.snap.pts;
-    for (let i = 0; i < P.length / 2; i++) { const [ix, iy] = cell(P[i * 2], P[i * 2 + 1]); add(pts, key(ix, iy), i); }
-    const A = s.segs.a;
-    for (let i = 0; i < A.length / 4; i++) {
-      const x1 = A[i * 4], y1 = A[i * 4 + 1], x2 = A[i * 4 + 2], y2 = A[i * 4 + 3];
-      const [ax, ay] = cell(Math.min(x1, x2), Math.min(y1, y2)), [bx, by] = cell(Math.max(x1, x2), Math.max(y1, y2));
+    const cx = (x) => Math.min(G, Math.max(0, Math.floor((x - e[0]) / cs)));
+    const cy = (y) => Math.min(G, Math.max(0, Math.floor((y - e[1]) / cs)));
+    const csr = (n, each) => { // each(i, emit(cell)) 를 두 번 돌려 개수 → 채우기
+      const st = new Int32Array(NC + 1);
+      for (let i = 0; i < n; i++) each(i, (c) => { st[c + 1]++; });
+      for (let c = 0; c < NC; c++) st[c + 1] += st[c];
+      const cur = st.slice(0, NC), idx = new Int32Array(st[NC]);
+      for (let i = 0; i < n; i++) each(i, (c) => { idx[cur[c]++] = i; });
+      return { st, idx };
+    };
+    const P = s.snap.pts, [pbx, pby] = s.snap.base || [0, 0];
+    const pts = csr(P.length / 2, (i, emit) => emit(cx(P[i * 2] + pbx) * (G + 1) + cy(P[i * 2 + 1] + pby)));
+    const src = segSource();
+    const q = [0, 0, 0, 0];
+    const segs = csr(src.n, (i, emit) => {
+      src.get(i, q);
+      const x1 = q[0], y1 = q[1], x2 = q[2], y2 = q[3];
+      const ax = cx(Math.min(x1, x2)), ay = cy(Math.min(y1, y2)), bx = cx(Math.max(x1, x2)), by = cy(Math.max(y1, y2));
       if ((bx - ax + 1) * (by - ay + 1) <= 16) {
-        for (let ix = ax; ix <= bx; ix++) for (let iy = ay; iy <= by; iy++) add(segs, key(ix, iy), i);
+        for (let ix = ax; ix <= bx; ix++) for (let iy = ay; iy <= by; iy++) emit(ix * (G + 1) + iy);
       } else {
         const n = Math.ceil(Math.hypot(x2 - x1, y2 - y1) / (cs / 2));
         let last = -1;
         for (let k = 0; k <= n; k++) {
-          const [ix, iy] = cell(x1 + ((x2 - x1) * k) / n, y1 + ((y2 - y1) * k) / n);
-          const kk = key(ix, iy);
-          if (kk !== last) { add(segs, kk, i); last = kk; }
+          const kk = cx(x1 + ((x2 - x1) * k) / n) * (G + 1) + cy(y1 + ((y2 - y1) * k) / n);
+          if (kk !== last) { emit(kk); last = kk; }
         }
       }
-    }
-    S.index = { pts, segs, cell, key, cs };
+    });
+    S.index = { pts, segs, src, cx, cy };
   }
   const KIND_ON = () => ({ 1: $('#snap-end').checked, 2: $('#snap-mid').checked, 3: $('#snap-cen').checked, 4: $('#snap-cen').checked, 5: $('#snap-near').checked });
   function findSnap(wx, wy, rpx) {
     const s = S.scene;
-    if (!s) return null;
-    if (!S.index) buildIndex();
+    if (!s || !S.index) return null; // 색인은 측정을 켤 때 따로 만든다
     const ix = S.index;
     const r = rpx / view.scale;
-    const [ax, ay] = ix.cell(wx - r, wy - r), [bx, by] = ix.cell(wx + r, wy + r);
+    const ax = ix.cx(wx - r), ay = ix.cy(wy - r), bx = ix.cx(wx + r), by = ix.cy(wy + r);
     if ((bx - ax + 1) * (by - ay + 1) > 3000) return null;
     const on = KIND_ON();
     let best = null, bd = r;
-    const P = s.snap.pts;
+    const P = s.snap.pts, [pbx, pby] = s.snap.base || [0, 0];
     const visL = (l) => view.layerVis[l] !== false;
-    for (let cx = ax; cx <= bx; cx++) for (let cy = ay; cy <= by; cy++) {
-      const list = ix.pts.get(ix.key(cx, cy));
-      if (!list) continue;
-      for (const i of list) {
-        const k = s.snap.kind[i];
+    for (let x = ax; x <= bx; x++) for (let y = ay; y <= by; y++) {
+      const c = x * (G + 1) + y, { st, idx } = ix.pts;
+      for (let j = st[c]; j < st[c + 1]; j++) {
+        const i = idx[j], k = s.snap.kind[i];
         if (!on[k] || !visL(s.snap.layer[i])) continue;
-        const d = Math.hypot(P[i * 2] - wx, P[i * 2 + 1] - wy);
-        if (d < bd) { bd = d; best = { x: P[i * 2], y: P[i * 2 + 1], kind: k }; }
+        const px = P[i * 2] + pbx, py = P[i * 2 + 1] + pby;
+        const d = Math.hypot(px - wx, py - wy);
+        if (d < bd) { bd = d; best = { x: px, y: py, kind: k }; }
       }
     }
     if (best || !on[5]) return best;
-    const A = s.segs.a;
-    for (let cx = ax; cx <= bx; cx++) for (let cy = ay; cy <= by; cy++) {
-      const list = ix.segs.get(ix.key(cx, cy));
-      if (!list) continue;
-      for (const i of list) {
-        if (!visL(s.segs.layer[i])) continue;
-        const x1 = A[i * 4], y1 = A[i * 4 + 1], x2 = A[i * 4 + 2], y2 = A[i * 4 + 3];
+    const { get, layerOf } = ix.src, q = [0, 0, 0, 0];
+    for (let x = ax; x <= bx; x++) for (let y = ay; y <= by; y++) {
+      const c = x * (G + 1) + y, { st, idx } = ix.segs;
+      for (let j = st[c]; j < st[c + 1]; j++) {
+        const i = idx[j];
+        get(i, q);
+        const x1 = q[0], y1 = q[1], x2 = q[2], y2 = q[3];
         const dx = x2 - x1, dy = y2 - y1, L2 = dx * dx + dy * dy;
         const t = L2 > 0 ? Math.max(0, Math.min(1, ((wx - x1) * dx + (wy - y1) * dy) / L2)) : 0;
         const px = x1 + dx * t, py = y1 + dy * t;
         const d = Math.hypot(px - wx, py - wy);
-        if (d < bd) { bd = d; best = { x: px, y: py, kind: 5 }; }
+        if (d < bd) {
+          const [l, g] = layerOf(i);
+          if (!view.isVisible(l, g)) continue;
+          bd = d; best = { x: px, y: py, kind: 5 };
+        }
       }
     }
     return best;
+  }
+  async function ensureIndex() {
+    if (S.index || !S.scene) return;
+    const big = S.scene.stats.segments > 1e6;
+    if (big) { setLoading(true, '스냅 준비 중…'); await tick(); }
+    const t0 = performance.now();
+    buildIndex();
+    log(`스냅 색인 ${((performance.now() - t0) / 1000).toFixed(1)}초`);
+    if (big) setLoading(false);
   }
   const measuring = () => S.tool === 'dist' || S.tool === 'area';
   // 측정 중에는 화면 가운데 십자선이 현재 점. 화면이 움직일 때마다 스냅을 다시 찾는다
@@ -702,6 +820,19 @@
 
   // ───────────────────────── 화면 위 측정·표시 ─────────────────────────
   view.onRender = () => { updateCenter(); drawUI(); };
+  view.onLive = () => { updateCenter(); drawUI(); }; // 움직이는 중: 도면은 CSS로 옮기고 측정 표시만 다시
+  // 한 번 그리는 데 걸린 시간 (선·문자 따로). 느리면 앱 로그로
+  const _render = view.render.bind(view), _renderText = view.renderText.bind(view);
+  let lastTextMs = 0;
+  view.renderText = () => { const t = performance.now(); _renderText(); lastTextMs = performance.now() - t; };
+  view.render = () => {
+    const t = performance.now();
+    _render();
+    if (BENCH) view.gl.finish();
+    const ms = performance.now() - t;
+    S.lastRenderMs = ms;
+    if (BENCH || ms > 150) log(`그리기 ${Math.round(ms)}ms (문자 ${Math.round(lastTextMs)}ms)`);
+  };
   function drawUI() {
     const dpr = window.devicePixelRatio || 1;
     if (ui.width !== Math.round(ui.clientWidth * dpr) || ui.height !== Math.round(ui.clientHeight * dpr)) {
@@ -808,6 +939,7 @@
     S.cur = [];
     $$('#toolbar [data-tool]').forEach((b) => b.classList.toggle('active', b.dataset.tool === t));
     $('#cross').hidden = !measuring();
+    if (measuring() && !S.index && S.scene) ensureIndex().then(() => { updateCenter(); drawUI(); });
     updateCenter();
     updateHint();
     updateBar();
@@ -831,6 +963,7 @@
   };
   $('#m-cancel').onclick = () => { if (S.cur.length) { S.cur = []; updateBar(); drawUI(); } else setTool('pan'); };
   $('#t-extents').onclick = () => view.zoomExtents();
+  $('#xbar-stop').onclick = () => { S.xrefStop = true; $('#xbar-msg').textContent = '멈추는 중…'; };
 
   // ───────────────────────── 터치 (포인터) ─────────────────────────
   // 한 손가락: 이동 · 두 손가락: 확대/축소+이동 · 두 번 탭: 확대 · 측정 중 탭: 그 자리(스냅)에 점
@@ -847,6 +980,7 @@
     if (!S.scene) return;
     ui.setPointerCapture(ev.pointerId);
     stopFling();
+    view.beginLive();
     if (ev.isPrimary) ptrs.clear(); // 새 제스처의 첫 손가락: 앞 제스처에서 떼는 신호를 놓친 손가락이 남아 있으면 지운다
     const p = local(ev);
     ptrs.set(ev.pointerId, p);
@@ -902,8 +1036,8 @@
     if (ptrs.size) return;
     const g = gest;
     gest = null;
-    if (ev.type === 'pointercancel') return;
-    if (!g.moved && performance.now() - g.t0 < 350) { onTap(p); return; }
+    if (ev.type === 'pointercancel') { view.endLive(); return; }
+    if (!g.moved && performance.now() - g.t0 < 350) { view.endLive(); onTap(p); return; }
     // 손을 뗀 속도로 조금 더 미끄러지기
     if (g.mode === 'pan' && g.hist.length >= 2) {
       const a = g.hist[0], b = g.hist[g.hist.length - 1], dt = b[0] - a[0];
@@ -918,12 +1052,13 @@
             view.panBy(vx * k, vy * k);
             const f = Math.pow(0.994, k);
             vx *= f; vy *= f;
-            fling.raf = Math.hypot(vx, vy) > 0.02 ? requestAnimationFrame(step) : (fling = null, 0);
+            fling.raf = Math.hypot(vx, vy) > 0.02 ? requestAnimationFrame(step) : (fling = null, view.endLive(), 0);
           };
           fling = { raf: requestAnimationFrame(step) };
         }
       }
     }
+    if (!fling) view.endLive();
   }
   ui.addEventListener('pointerup', endPointer);
   ui.addEventListener('pointercancel', endPointer);
@@ -943,12 +1078,13 @@
   function animateZoom(sx, sy, f) {
     const t0 = performance.now(), dur = 180;
     let done = 1;
+    view.beginLive();
     const step = (now) => {
       const t = Math.min(1, (now - t0) / dur);
       const target = Math.pow(f, 1 - Math.pow(1 - t, 3));
       view.zoomAt(sx, sy, target / done);
       done = target;
-      if (t < 1) requestAnimationFrame(step);
+      if (t < 1) requestAnimationFrame(step); else view.endLive();
     };
     requestAnimationFrame(step);
   }
@@ -1043,6 +1179,19 @@
   view.resize(stage.clientWidth, stage.clientHeight, dprOf());
   showHome(true);
   if (native) native.postMessage({ type: 'ready' });
+  // 개발용: ?memtest — 화면 엔진이 메모리를 몇 MB까지 쓸 수 있는지 100MB씩 늘려 가며 앱 로그로 남긴다
+  if (/memtest/.test(location.search)) {
+    const keep = [];
+    let mbUsed = 0;
+    const step = () => {
+      const a = new Uint8Array(100 * 1048576);
+      for (let i = 0; i < a.length; i += 4096) a[i] = 1; // 실제로 쓰게 만든다
+      keep.push(a); mbUsed += 100;
+      log(`메모리 시험 ${mbUsed}MB`);
+      setTimeout(step, 250);
+    };
+    setTimeout(step, 500);
+  }
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 
   window.__dwg = { S, view, openFiles, openMain, pool };

@@ -149,3 +149,14 @@ button.big { width: 100%; max-width: 360px; font-size: 18px; padding: 14px; marg
 
 button.wide { width: 100%; margin: 8px 0; }
 #lib-filter { margin: 4px 0 6px; }
+
+/* XREF 불러오는 중 표시 (도면은 계속 움직일 수 있음) */
+#xbar {
+  position: absolute; left: 50%; top: 10px; transform: translateX(-50%); width: calc(100% - 20px); max-width: 520px;
+  display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 12px; border-radius: 22px;
+  background: rgba(0,0,0,.8); color: #fff; font-size: 13px;
+}
+#xbar span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#xbar button { min-height: 32px; padding: 4px 12px; font-size: 13px; }
+#xbar .spin { width: 16px; height: 16px; flex: none; border: 2px solid rgba(255,255,255,.3); border-top-color: var(--acc); border-radius: 50%; animation: spin .9s linear infinite; }
+body.xloading #hint { top: 60px; }
