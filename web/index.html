@@ -104,12 +104,24 @@
       <ul id="pick-list" class="list"></ul>
     </div>
 
+    <div class="pane" data-pane="pdf">
+      <p class="note">용지</p>
+      <div class="row seg" data-opt="paper"><button data-v="A4" class="on">A4</button><button data-v="A3">A3</button></div>
+      <p class="note">방향</p>
+      <div class="row seg" data-opt="orient"><button data-v="auto" class="on">자동</button><button data-v="land">가로</button><button data-v="port">세로</button></div>
+      <p class="note">범위</p>
+      <div class="row seg" data-opt="range"><button data-v="view" class="on">지금 보이는 화면</button><button data-v="all">도면 전체</button></div>
+      <p class="note">흰 배경에 검은 선으로 만들고, 꺼 둔 레이어는 빠집니다. 축척은 용지에 맞춥니다.</p>
+      <div class="row"><button id="pdf-make" class="primary">PDF 만들기</button></div>
+    </div>
+
     <div class="pane" data-pane="more">
       <ul class="list menu">
         <li id="mn-measure">📐 측정 목록</li>
         <li id="mn-xrefs">📎 XREF</li>
         <li id="mn-bg">◐ 배경 검정/흰색</li>
         <li id="mn-png">📷 현재 화면 이미지로 저장·공유</li>
+        <li id="mn-pdf">📄 PDF로 내보내기</li>
         <li id="mn-snap">🧲 스냅 설정</li>
         <li id="mn-about">ⓘ 정보 · 오픈소스 라이선스</li>
       </ul>

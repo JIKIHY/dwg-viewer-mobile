@@ -422,7 +422,7 @@
   };
 
   // ───────────────────────── 아래 패널(시트) ─────────────────────────
-  const TITLES = { layers: '레이어', search: '문자 검색', measure: '측정 목록', xrefs: 'XREF', more: '더보기', pick: '열 도면을 고르세요' };
+  const TITLES = { layers: '레이어', search: '문자 검색', measure: '측정 목록', xrefs: 'XREF', more: '더보기', pick: '열 도면을 고르세요', pdf: 'PDF로 내보내기' };
   let sheetName = null;
   function openSheet(name) {
     sheetName = name;
@@ -1135,6 +1135,110 @@
     if (native) { native.postMessage({ type: 'share', name, dataUrl: out.toDataURL('image/png') }); return; }
     const blob = await new Promise((r) => out.toBlob(r, 'image/png'));
     const file = new File([blob], name, { type: 'image/png' });
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
+    } catch (e) { if (e.name === 'AbortError') return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
+
+  // ───────────────────────── PDF 내보내기 ─────────────────────────
+  // 화면 그리기(View)를 잠시 용지 크기의 큰 캔버스로 바꿔 흰 배경으로 한 번 그리고, 그 그림을 JPEG로 담은 PDF를 만든다
+  const pdfOpt = { paper: 'A4', orient: 'auto', range: 'view' };
+  $$('#sheet .seg').forEach((row) => row.querySelectorAll('button').forEach((b) => (b.onclick = () => {
+    row.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+    pdfOpt[row.dataset.opt] = b.dataset.v;
+  })));
+  $('#mn-pdf').onclick = () => { if (S.scene) openSheet('pdf'); };
+  const PAPER_PT = { A4: [842, 595], A3: [1191, 842] }; // 가로 기준 (pt = 1/72인치)
+
+  function makePdf(jpeg, pw, ph, iw, ih) {
+    // 한 쪽짜리 PDF: 이미지 하나를 여백 10mm 안에 비율을 지켜 가운데에 놓는다
+    const m = 28.35, aw = pw - 2 * m, ah = ph - 2 * m;
+    const k = Math.min(aw / iw, ah / ih), dw = iw * k, dh = ih * k;
+    const dx = (pw - dw) / 2, dy = (ph - dh) / 2;
+    const enc = new TextEncoder();
+    const content = `q ${dw.toFixed(2)} 0 0 ${dh.toFixed(2)} ${dx.toFixed(2)} ${dy.toFixed(2)} cm /Im0 Do Q`;
+    const parts = []; const offs = []; let len = 0;
+    const add = (x) => { const b = typeof x === 'string' ? enc.encode(x) : x; parts.push(b); len += b.length; };
+    add('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
+    const obj = (n, body) => { offs[n] = len; add(`${n} 0 obj\n`); for (const b of body) add(b); add('\nendobj\n'); };
+    obj(1, ['<< /Type /Catalog /Pages 2 0 R >>']);
+    obj(2, ['<< /Type /Pages /Kids [3 0 R] /Count 1 >>']);
+    obj(3, [`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pw} ${ph}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>`]);
+    obj(4, [`<< /Type /XObject /Subtype /Image /Width ${iw} /Height ${ih} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`, jpeg, '\nendstream']);
+    obj(5, [`<< /Length ${content.length} >>\nstream\n${content}\nendstream`]);
+    const xref = len;
+    let x = 'xref\n0 6\n0000000000 65535 f \n';
+    for (let n = 1; n <= 5; n++) x += String(offs[n]).padStart(10, '0') + ' 00000 n \n';
+    add(x + `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+    const out = new Uint8Array(len); let o = 0;
+    for (const b of parts) { out.set(b, o); o += b.length; }
+    return out;
+  }
+
+  async function renderForPdf() {
+    // 범위(세계 좌표)
+    let x0, y0, x1, y1;
+    if (pdfOpt.range === 'all') { [x0, y0, x1, y1] = S.scene.extents; }
+    else { [x0, y1] = view.toWorld(0, 0); [x1, y0] = view.toWorld(view.w, view.h); }
+    const land = pdfOpt.orient === 'land' || (pdfOpt.orient === 'auto' && (x1 - x0) >= (y1 - y0));
+    const [pl, ps] = PAPER_PT[pdfOpt.paper];
+    const pw = land ? pl : ps, ph = land ? ps : pl;
+    // 용지 안쪽(여백 10mm) 크기로, 약 200dpi. 큰 캔버스는 휴대폰 메모리 한도 안으로 줄인다
+    let dpr = 200 / 72;
+    const iwPt = pw - 56.7, ihPt = ph - 56.7;
+    while (iwPt * ihPt * dpr * dpr > 12e6) dpr *= 0.9;
+    const keep = { cx: view.cx, cy: view.cy, scale: view.scale, w: view.w, h: view.h, dpr: view.dpr, light: view.light };
+    try {
+      view.light = true;
+      view.resize(iwPt, ihPt, dpr);
+      view.zoomTo(x0, y0, x1, y1, pdfOpt.range === 'all' ? 0.02 : 0);
+      view.dirty = true; // 예약된 그리기를 막고 지금 한 번만 그린다
+      view.render();
+      const iw = view.gc.width, ih = view.gc.height;
+      const c = document.createElement('canvas'); c.width = iw; c.height = ih;
+      const g = c.getContext('2d');
+      g.fillStyle = '#fff'; g.fillRect(0, 0, iw, ih);
+      g.drawImage(view.gc, 0, 0); g.drawImage(view.tc, 0, 0);
+      // 아래쪽에 파일 이름·날짜
+      const fs = Math.round(9 * dpr);
+      g.font = `${fs}px -apple-system, sans-serif`; g.fillStyle = '#555'; g.textAlign = 'right';
+      const d = new Date();
+      g.fillText(`${S.mainName} · ${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} · 용지에 맞춤(축척 아님)`, iw - fs * 0.6, ih - fs * 0.6);
+      const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.9));
+      c.width = c.height = 0;
+      return { jpeg: new Uint8Array(await blob.arrayBuffer()), iw, ih, pw, ph };
+    } finally {
+      view.light = keep.light;
+      view.resize(keep.w, keep.h, keep.dpr);
+      view.cx = keep.cx; view.cy = keep.cy; view.scale = keep.scale;
+      view.dirty = false; view.request();
+    }
+  }
+
+  $('#pdf-make').onclick = async () => {
+    if (!S.scene) return;
+    closeSheet();
+    setLoading(true, 'PDF 만드는 중…');
+    let pdf;
+    try {
+      const r = await renderForPdf();
+      pdf = makePdf(r.jpeg, r.pw, r.ph, r.iw, r.ih);
+    } catch (e) {
+      log('PDF 오류: ' + e.message);
+      hint('PDF를 만들지 못했습니다: ' + e.message, 5000);
+      return;
+    } finally { setLoading(false); }
+    const name = S.mainName.replace(/\.(dwg|dxf)$/i, '') + `_${pdfOpt.paper}.pdf`;
+    const blob = new Blob([pdf], { type: 'application/pdf' });
+    if (native) {
+      const dataUrl = await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); });
+      native.postMessage({ type: 'share', name, dataUrl });
+      return;
+    }
+    const file = new File([blob], name, { type: 'application/pdf' });
     try {
       if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
     } catch (e) { if (e.name === 'AbortError') return; }

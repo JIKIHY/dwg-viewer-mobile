@@ -160,3 +160,7 @@ button.wide { width: 100%; margin: 8px 0; }
 #xbar button { min-height: 32px; padding: 4px 12px; font-size: 13px; }
 #xbar .spin { width: 16px; height: 16px; flex: none; border: 2px solid rgba(255,255,255,.3); border-top-color: var(--acc); border-radius: 50%; animation: spin .9s linear infinite; }
 body.xloading #hint { top: 60px; }
+
+/* PDF 내보내기 선택 버튼 */
+#sheet .seg button.on { background: rgba(0,183,212,.18); border-color: var(--acc); color: var(--acc); font-weight: 600; }
+#sheet .pane[data-pane="pdf"] .note { margin-top: 10px; }
